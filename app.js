@@ -3,6 +3,10 @@ const busboy = require('connect-busboy');
 const path = require('path');
 const fs = require('fs');
 const flif = require('node-flif');
+const jimp = require('jimp');
+const mozjpeg = require('mozjpeg');
+const { execFile } = require('child_process');
+
 const app = express();
 const port = 3000;
 
@@ -11,7 +15,19 @@ app.use(busboy({
   highWaterMark: 5 * 1024 * 1024,
 }));
 
-const convertToPng = () => {};
+const convertToPng = async (file, filename) => {
+  console.log('Converting to PNG');
+
+  return new Promise(resolve => {
+    const f = file.replace(/\.(jpg|jpeg)/,`_${Date.now()}.png`);
+    jimp.read(file).then(tmp => {
+      tmp.write(f, () => {
+        console.log('Convert to PNG complete');
+        resolve([f, filename.replace(/jpg|jpeg/, 'png')]);
+      });
+    });
+  });
+};
 
 const compress = (file, filename) => {
   const flifName = `${filename}_${Date.now()}.flif`;
@@ -27,29 +43,43 @@ const compress = (file, filename) => {
   return flifName;
 };
 
+const saveFile = (file, filename) => {
+  return new Promise((resolve, reject) => {
+    const fstream = fs.createWriteStream(path.join('/tmp', filename));
+    file.pipe(fstream);
+    fstream.on('close', resolve);
+  });
+};
+
 app.route('/upload').post((req, res, next) => {
 
   let realFilename, temp;
 
   req.pipe(req.busboy);
 
-  req.busboy.on('file', (fieldname, file, filename) => {
+  req.busboy.on('file', async (fieldname, file, filename) => {
     temp = `/tmp/${filename}`;
     realFilename = filename;
     console.log(`Upload of '${filename}' started`);
 
-    const fstream = fs.createWriteStream(path.join('/tmp', filename));
-    file.pipe(fstream);
+    await saveFile(file, filename);
 
-    fstream.on('close', () => {
-      console.log(`Upload of '${filename}' finished`);
-      console.log('compressing...');
-      const outFile = compress(temp, realFilename);
-      console.log('done compressing.');
-      const origStats = fs.statSync(temp);
-      const stats = fs.statSync(`uploads/${outFile}`);
+    console.log(`Upload of '${filename}' finished`);
 
-      res.send(`
+    if( realFilename.match(/\.(jpg|jpeg)/) !== null ) {
+      ([temp, realFilename] = await convertToPng(temp, realFilename));
+    }
+
+    console.log('Compressing...');
+
+    const outFile = compress(temp, realFilename);
+
+    console.log('done compressing.');
+
+    const origStats = fs.statSync(temp);
+    const stats = fs.statSync(`uploads/${outFile}`);
+
+    res.send(`
       <html>
         <head>
           <style>
@@ -75,8 +105,7 @@ app.route('/upload').post((req, res, next) => {
           </p>
         </body>
       </html>
-      `);
-    });
+    `);
   });
 });
 
@@ -113,6 +142,55 @@ app.get('/fit/:width/:height/:file', (req, res) => {
   const { width, height } = req.params;
   const out = decode({ fit: { width, height } }, req);
   res.sendFile(out);
+});
+
+const compressMozJpeg = (temp, filename) => {
+  const f = `${Date.now()}_${filename}`;
+
+  return new Promise(resolve => {
+    execFile(mozjpeg, ['-outfile', `uploads/${f}`, temp], err => {
+      resolve(f);
+    });
+  });
+};
+
+app.route('/upload-mozjpeg').post((req, res, next) => {
+  let realFilename, temp;
+
+  req.pipe(req.busboy);
+
+  req.busboy.on('file', async (fieldname, file, filename) => {
+    temp = `/tmp/${filename}`;
+    realFilename = filename;
+    console.log(`Upload of '${filename}' started`);
+
+    await saveFile(file, filename);
+
+    console.log('Compressing...');
+
+    const outFile = await compressMozJpeg(temp, realFilename);
+
+    console.log('done compressing.');
+
+    const origStats = fs.statSync(temp);
+    const stats = fs.statSync(`uploads/${outFile}`);
+
+    res.send(`
+      <html>
+        <head>
+          <style>
+            body { font-family: arial; }
+          </style>
+        </head>
+        <body>
+          <p>
+            Original size: ${Math.round(origStats.size/(1024))}kb<br>
+            Mozjpeg size: ${Math.round(stats.size/(1024))}kb
+          </p>
+        </body>
+      </html>
+    `);
+  });
 });
 
 app.listen(port, () => {
